@@ -4,8 +4,9 @@
 # Ignore node_modules folder
 node_modules
 
-# Ignore all text files
+# Ignore all text and csv files
 *.csv
+*.txt
 
 # Ignore files related to API keys
 .env

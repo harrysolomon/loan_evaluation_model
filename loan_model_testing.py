@@ -121,7 +121,7 @@ def fv_dollar_price(use_discount, period, sale_date, balance, exit_price_pct):
 
 # determine if a servicing cost should be incurred
 def service_cost_amt(balance, service_cost):
-    if balance > 0:
+    if balance > 0.5:
         final_cost = service_cost
     else:
         final_cost = 0 

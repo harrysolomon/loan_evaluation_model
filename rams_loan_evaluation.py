@@ -8,7 +8,7 @@ import csv
 import sqlite3
 
 def main():
-    file = 'test_files/first_loan_2021.11.29.csv'
+    file = sys.argv[1]
     prepayment_penalty = pd.DataFrame(prepayment_penalty_df(file))
     forbearance_recovery = pd.DataFrame(forbearance_recovery_month(file))
     default_recovery_rates = pd.DataFrame(default_recovery_df(file))

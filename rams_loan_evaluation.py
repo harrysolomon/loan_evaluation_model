@@ -1,22 +1,15 @@
 import pandas as pd
-from datetime import date
+#from datetime import date
 import numpy as np
 import numpy_financial as npf
-from collections import OrderedDict
+#from collections import OrderedDict
+import math
 import sys
-import csv 
 import sqlite3
 
 def main():
-    file = sys.argv[1]
-    prepayment_penalty = pd.DataFrame(prepayment_penalty_df(file))
-    forbearance_recovery = pd.DataFrame(forbearance_recovery_month(file))
-    default_recovery_rates = pd.DataFrame(default_recovery_df(file))
-    forbear_rates = pd.DataFrame(forbear_df(file))
-    loan_schedule = pd.DataFrame(amortization_schedule(file))
-
-    loan_df_final = pd.read_csv(file)
-
+    file = f"test_files/{sys.argv[1]}"
+    loan_df_final = pd.read_excel(file)
     loan_df = loan_df_final.rename(columns={
         'Loan ID': 'loanId', 
         'Servicing Cost per Month ($)': 'servicingCostDollar',
@@ -28,6 +21,176 @@ def main():
         'Sale or Exit Price': 'saleExitPrice'
     })
 
+    loan_df = loan_df.rename(columns={'LoanId': 'loanId'})
+
+    reduced_columns = [
+        'loanId','servicingCostDollar','holdToMaturity','saleDateMonths','applyBuyerDiscRate','buyerDiscRate','investorDiscRate','saleExitPrice'
+    ]
+
+    loan_list = loan_df.values.tolist()
+
+    prepayment_penalty = pd.DataFrame(prepayment_penalty_df(loan_list))
+    default_recovery_rates = pd.DataFrame(default_recovery_df(loan_list))
+    forbear_rates = pd.DataFrame(forbear_df(loan_list))
+    loan_schedule = pd.DataFrame(amortization_schedule(loan_list))
+
+    loan_level, loan_schedules = loop_through_loans(
+        loan_df[reduced_columns], prepayment_penalty, default_recovery_rates, forbear_rates, loan_schedule
+    )
+
+    reduced_loan_level_columns = [
+        'loanId',
+        'totalNotionalDefault',
+        'defaultRecoveryAppliedNpv',
+        'forbearanceRecoveryAppliedNpv',
+        'monthlyForbearanceAppliedNpv',
+        'prepaymentsAppliedNpv',
+        'prepaymentPenaltiesAppliedNpv',
+        'paymentAppliedNpv',
+        'servicingCostAppliedNpv',
+        'totalFvSaleExitProceeds',
+        'totalFvCashflows',
+        'totalLoanNpv',
+        'priceBalanceRatio'
+    ]
+
+    rename_output_fields = {
+        'totalNotionalDefault': 'Notional Default',
+        'defaultRecoveryAppliedNpv': 'Default Recovery',
+        'forbearanceRecoveryAppliedNpv': 'Forbearance Recovery',
+        'monthlyForbearanceAppliedNPV': 'Monthly Forbearance',
+        'prepaymentsAppliedNpv': 'Prepayments',
+        'prepaymentPenaltiesAppliedNpv': 'Prepayment Penalties',
+        'paymentAppliedNpv': 'Scheduled Loan Payment',
+        'servicingCostAppliedNpv': 'Servicing Cost',
+        'totalFvSaleExitProceeds': 'Sale/Exit Proceeds',
+        'totalFvCashflows': 'Net Cashflows',
+        'totalLoanNpv': 'Loan NPV',
+        'priceBalanceRatio': 'Dollar Price'
+    }
+
+    final = loan_df_final.merge(
+    loan_level[reduced_loan_level_columns].rename(columns=rename_output_fields), 
+    left_on='LoanId', 
+    right_on='loanId'
+)
+
+    final.to_excel(f"output_files/{sys.argv[2]}")
+
+def loop_through_loans(loans, prepayment_penalty, default_recovery, forbear_rates, loan_schedule, increment=300):
+    loops = int(math.ceil(loans.count()[0] / increment))
+    df_final = pd.DataFrame([])
+    schedules = pd.DataFrame([])
+    
+    for rows in range(loops):
+        lower_bound = rows * increment
+        upper_bound = (rows + 1) * increment
+        
+        reduced_loans = loans[lower_bound:upper_bound]
+        loan_list = reduced_loans['loanId'].values.tolist()
+        
+        schedule = cashflow_df(
+                    loan_schedule[loan_schedule.loanId.isin(loan_list)], 
+                    forbear_rates[forbear_rates.loanId.isin(loan_list)], 
+                    default_recovery[default_recovery.loanId.isin(loan_list)], 
+                    loans, 
+                    prepayment_penalty[prepayment_penalty.loanId.isin(loan_list)]
+                )
+        
+        schedule_aggregate = model_aggregation(schedule)
+        
+        df_final = df_final.append(schedule_aggregate)
+        schedules = schedules.append(schedule)
+        
+    #ratio beginning balance to loan npv
+    price_balance_ratio = round(df_final['totalLoanNpv'] / df_final['beginBalance'], 6)
+    df_final['priceBalanceRatio'] = price_balance_ratio
+    
+    return df_final, schedules
+
+# aggregation step
+def model_aggregation(df):
+
+    conn = sqlite3.connect(':memory:')
+    conn.create_function("power", 2, sqlite_power)
+    df.to_sql('cashflow_schedule', conn, index=False)
+    qry = '''
+        select 
+            loanId,
+            max(beginBalance) beginBalance,
+            sum(prepayments) as totalPrepayments,
+            sum(notionalDefault) as totalNotionalDefault,
+            sum(principal) as totalPrincipal,
+            sum(prepayments + notionalDefault + principal) as derivedBeginBalance,
+            sum(interest) as totalInterest,
+            sum(forbearInterest) as totalForbearInterest,
+            sum(forbearPrincipal) as totalForbearPrincipal,
+            sum(forbearedInterestRecovered) as totalForbearInterestRecovered,
+            sum(forbearedInterestRecovered) as totalForbearPrincipalRecovered,
+            sum(defaultRecovery) as totalDefaultRecovery,
+            sum(forbearanceRecovery) as totalForbearanceRecovery,
+            -sum(monthlyForbearance) as totalMonthlyForbearanceRecovered,
+            sum(monthlyForbearance) as totalMonthlyForbearance,
+            sum(prepaymentPenalties) as totalPrepaymentPenalties,
+            sum(payment) as totalPayment,
+            sum(servicingCost) as totalServicingCost,
+            sum(netCashflows) as totalNetCashflows,
+            sum(fvHoldCash) as totalFvHoldCash,
+            sum(fvCashflowSale) as totalFvCashflowSale,
+            sum(fvCashflowSaleDollarPrice) as totalFvCashflowSaleDollarPrice,
+            sum(fvSaleExitProceeds) as totalFvSaleExitProceeds,
+            sum(fvCashflows) as totalFvCashflows,
+            sum(loanNpv) as totalLoanNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then defaultRecovery else 0 end) 
+                else sum(defaultRecovery)
+            end as defaultRecoveryAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then forbearanceRecovery else 0 end) 
+                else sum(forbearanceRecovery)
+            end as forbearanceRecoveryAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then monthlyForbearance else 0 end) 
+                else sum(monthlyForbearance)
+            end as monthlyForbearanceAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then prepayments else 0 end) 
+                else sum(prepayments)
+            end as prepaymentsAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then prepaymentPenalties else 0 end) 
+                else sum(prepaymentPenalties)
+            end as prepaymentPenaltiesAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then payment else 0 end) 
+                else sum(payment)
+            end as paymentAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then servicingCost else 0 end)
+                else sum(servicingCost)
+            end as servicingCostAppliedNpv,
+            case when holdToMaturity = 'NO'
+                then sum(case when period <= saleDateMonths then netCashflows else 0 end)
+                else sum(netCashflows)
+            end as netCashflowsAppliedNpv
+
+        from cashflow_schedule
+        group by loanId
+        '''
+
+    loan_level_aggreates = pd.read_sql_query(qry, conn)
+    return loan_level_aggreates
+
+def cashflow_df(loan_schedule, forbear_rates, default_recovery_rates, loan_df, prepayment_penalty):
+
+    #Bug, missing a period because of a strange default recovery tier. Need to fix.
+
+    #forbearance recovery support
+    #rollup results
+    #confirm works for multiple loans
+
+    #This output will be the equivalent of the whole loan level tab
+    #This way we can check our work before summing the results in a later stage
 
     conn = sqlite3.connect(':memory:')
 
@@ -79,12 +242,32 @@ def main():
         and ls.period between pp.tierLow and pp.tierHigh
         order by ls.loanId, ls.period),
         
+        forbearance_recovery as (
+        select 
+            ci.loanId, 
+            24 as recoveryPeriod, 
+            -sum(ci.forbearInterest) as forbearedInterestRecovered,
+            -sum(ci.forbearPrincipal) as forbearedPrincipalRecovered,
+            -sum(ci.monthlyForbearance) as forbearanceRecovery 
+            from cashflow_inputs ci 
+            where ci.period between 1 and 24
+            group by ci.loanId, recoveryPeriod
+            
+        ),
+
         add_net_cashflow as (
         select 
             ci.*,
-            (monthlyForbearance + prepayments + payment + servicingCost + defaultRecovery + prepaymentPenalties) as netCashflows   
-        from cashflow_inputs ci),
-        
+            coalesce(fr.forbearedInterestRecovered,0) as forbearedInterestRecovered,
+            coalesce(fr.forbearedPrincipalRecovered,0) as forbearedPrincipalRecovered,
+            coalesce(fr.forbearanceRecovery,0) as forbearanceRecovery,
+            (monthlyForbearance + prepayments + payment + servicingCost + defaultRecovery + prepaymentPenalties + coalesce(fr.forbearanceRecovery,0)) as netCashflows   
+        from cashflow_inputs ci
+        left outer join forbearance_recovery fr 
+        on ci.loanId = fr.loanId
+        and ci.period = fr.recoveryPeriod
+        ),
+
         cashflow_sale as (
         select
             ac.*,
@@ -97,11 +280,11 @@ def main():
                 then ac.netCashflows / power(1+(buyerDiscRate/12),period - saleDateMonths) else 0 end 
             as fvCashflowSale,
             case when 
-                (ac.period = saleDateMonths and applyBuyerDiscRate = 'NO' and holdToMaturity = 'NO')
+                (ac.period = saleDateMonths and applyBuyerDiscRate = 'NO')
                 then ac.endBalance * saleExitPrice else 0 end 
             as fvCashflowSaleDollarPrice
         from add_net_cashflow ac),
-        
+
         sum_buyer_discount_sale as (
         select
             cs.loanId,
@@ -110,7 +293,7 @@ def main():
         from cashflow_sale cs
         group by loanId, saleDateMonths
         )
-        
+
         select
             cs.*,
             (coalesce(fvCashflowSaleBuyDiscount,0) + fvCashflowSaleDollarPrice) as fvSaleExitProceeds,
@@ -120,36 +303,95 @@ def main():
         left outer join sum_buyer_discount_sale ss 
         on cs.loanId = ss.loanId
         and cs.period = ss.saleDateMonths
-            
+
+
         '''
     cashflow_schedule_df = pd.read_sql_query(qry, conn)
-    cashflow_schedule_df.to_csv('testing12')
+    return cashflow_schedule_df
 
-def rate_tier(tiers, rates, period):
-    numpy_tier_array = np.array(tiers)
-    tier_index = np.argwhere(numpy_tier_array <= period)
-    selected_rate = rates[max(tier_index)[0]]
-    return round(selected_rate,6)
+def sqlite_power(x,n):
+    return float(x)**n
 
+def prepayment_penalty_df(file):
+    rates = [47, 48, 49, 50, 51]
+    
+    for row in file:
+        num_periods = int(row[18])
+        for period in range(6):
+            if period == 5:
+                tierHigh = num_periods
+                rate = float(0)
+            else:
+                tierHigh = int((period+1)*12)
+                rate = float(row[rates[period]])
+                             
+            yield dict(
+                [
+                    ('loanId', row[2]),
+                    ('tierLow', int((period*12)+1)),
+                    ('tierHigh', tierHigh),
+                    ('rate', rate)
+                ]
+            )
+
+# Only two options instead of 3 in the dataset because the 3rd is for the month 360, this could be flawed.
+def default_recovery_df(file):
+    for row in file:
+        num_periods = int(row[18])
+
+        yield dict(
+            [
+                ('loanId', row[2]),
+                ('tierLow', 1),
+                ('tierHigh', 35),
+                ('rate', float(row[43]))
+            ]
+        )
+        
+        yield dict(
+            [
+                ('loanId', row[2]),
+                ('tierLow', 36),
+                ('tierHigh', num_periods),
+                ('rate', float(row[44]))
+            ]
+        )
+
+def forbear_df(file):
+    
+    tier_location = [19, 21, 23, 25, 27]
+    rates = [20, 22, 24, 26, 28]
+
+    for row in file:
+        for tier in range(len(tier_location)):
+            if tier == 0:
+                tier_low = 1
+            else:
+                tier_low = int(row[tier_location[tier-1]]) + 1
+
+            yield dict(
+                [
+                    ('loanId', row[2]),
+                    ('tierLow', tier_low),
+                    ('tierHigh', int(row[tier_location[tier]])),
+                    ('rate', float(row[rates[tier]]))
+                ]
+
+            )
 def amortization_schedule(file):
-    loan_csv = open(file)
-    loan_csvreader = csv.reader(loan_csv)
-    next(loan_csvreader)
 
-    for row in loan_csvreader:
-        num_periods = int(row[3])
-        loan_id = row[0]
-        interest_rate = float(row[2])
-        num_periods = int(row[3])
-        discount_rate = float(row[40])
-        beg_balance = int(row[1])
-        cdr = float(row[31])
+    for row in file:
+        num_periods = int(row[18])
+        loan_id = row[2]
+        interest_rate = float(row[17])
+        beg_balance = int(row[16])
+        cdr = float(row[42])
         annual_payments = 12
         
-        cpr_tiers = [int(row[21]), int(row[23]), int(row[25]), int(row[27]), int(row[29])]
-        cpr_rates = [float(row[22]), float(row[24]), float(row[26]), float(row[28]), float(row[30])]
+        cpr_tiers = [int(row[32]), int(row[34]), int(row[36]), int(row[38]), int(row[40])]
+        cpr_rates = [float(row[33]), float(row[35]), float(row[37]), float(row[39]), float(row[41])]
         
-        default_recovery_beg_month = int(row[38])
+        default_recovery_beg_month = int(row[52])
         
         
         # need this for notional default and default recovery
@@ -158,7 +400,6 @@ def amortization_schedule(file):
         end_balance = beg_balance
         
         while end_balance > 0:
-
 
             monthly_cdr = round(1-(1-cdr)**(1/12),6)
         
@@ -171,9 +412,6 @@ def amortization_schedule(file):
             # Recalculate the interest based on the current balance
             interest = round(((interest_rate/annual_payments) * beg_balance), 0)
             
-            # Determine monthly payment based on whether or not this period will pay off the loan
-            pmt = round(min(pmt, beg_balance + interest), 0)
-            
             # Calculate the Principal
             principal = round(pmt - interest, 0)
             
@@ -182,10 +420,24 @@ def amortization_schedule(file):
             prepayments = round(prepayment_smm * (beg_balance - principal), 0)
             
             # Ensure prepayment gets adjusted if the loan is being paid off
-            prepayments = round(min(prepayments, beg_balance - principal), 0)
-            
+            #prepayments = round(min(prepayments, beg_balance - principal), 0)
+
+            # Determine monthly payment based on whether or not this period will pay off the loan
+            pmt = round(min(pmt, beg_balance + interest), 0)
+
             # Calculate the notional default
             notional_default = round(notional_default_rate(p, default_recovery_beg_month, balance_list) * monthly_cdr, 0)
+            
+            #End payment schedule when beg balance < 100
+            
+            #need to add one more thing. If the sum of principal, prepayment, and notional default
+            #is greater than the remaining balance, then give everything to the principal
+            if beg_balance <= 100 or (principal + prepayments + notional_default) > beg_balance:
+                pmt = beg_balance
+                principal = beg_balance
+                interest = 0
+                notional_default = 0
+                prepayments = 0
             
             # End Balance
             end_balance = round(beg_balance - (principal + prepayments + notional_default), 0)
@@ -216,109 +468,19 @@ def notional_default_rate(period, month, balance_list):
     
     return base_balance
 
-
-# to do:
-# Adjust the tiers to be based on the upper bound instead of lower bound
-def forbear_df(file):
+# This determines the rate within a range of time
+def rate_tier(tiers, rates, period):
+    numpy_tier_array = np.array(tiers)
+    tier_index = np.argwhere(numpy_tier_array >= period)
     
-    tier_location = [5, 7, 9, 11, 13]
-    rates = [6, 8, 10, 12, 14]
+    # If we are outside the bounds, the rate is 0
+    if tier_index.size == 0:
+        selected_rate = 0 
+    else:
+        selected_rate = rates[min(tier_index)[0]]
     
-    loan_csv = open(file)
-    loan_csvreader = csv.reader(loan_csv)
-    next(loan_csvreader)
-    for row in loan_csvreader:
-        num_periods = int(row[3])
-        for tier in range(len(tier_location)):
-            if tier == len(tier_location) - 1:
-                tier_high = num_periods
-            else:
-                tier_high = int(row[tier_location[tier+1]]) -1
+    return round(selected_rate,6)
 
-            yield dict(
-                [
-                    ('loanId', row[0]),
-                    ('tierLow', int(row[tier_location[tier]])),
-                    ('tierHigh', tier_high),
-                    ('rate', float(row[rates[tier]]))
-                ]
-
-            )
-
-# to do:
-# Adjust the tiers to be based on the upper bound instead of lower bound
-def default_recovery_df(file):
-    
-    tier_location = [34, 36]
-    rates = [35, 37]
-    
-    loan_csv = open(file)
-    loan_csvreader = csv.reader(loan_csv)
-    next(loan_csvreader)
-    for row in loan_csvreader:
-        num_periods = int(row[3])
-        for tier in range(len(tier_location)):
-            if tier == 1:
-                tier_high = num_periods
-                tier_low = int(row[tier_location[tier]]) + 1
-            else:
-                tier_high = int(row[tier_location[tier+1]])
-                tier_low = int(row[tier_location[tier]])
-
-            yield dict(
-                [
-                    ('loanId', row[0]),
-                    ('tierLow', tier_low),
-                    ('tierHigh', tier_high),
-                    ('rate', float(row[rates[tier]]))
-                ]
-
-            )
-
-def forbearance_recovery_month(file):
-    
-    months = [15, 17, 19]
-    rates = [16, 18, 20]
-    
-    loan_csv = open(file)
-    loan_csvreader = csv.reader(loan_csv)
-    next(loan_csvreader)
-    for row in loan_csvreader:
-        for month in range(len(months)):
-
-            yield dict(
-                [
-                    ('loanId', row[0]),
-                    ('month', row[months[month]]),
-                    ('rate', float(row[rates[month]]))
-                ]
-
-            )
-def prepayment_penalty_df(file):
-    rates = [0.02, 0.01, 0.00, 0.00, 0.00, 0.00]
-    loan_csv = open(file)
-    loan_csvreader = csv.reader(loan_csv)
-    next(loan_csvreader)
-    
-    for row in loan_csvreader:
-        num_periods = int(row[3])
-        for period in range(6):
-            if period == 5:
-                tierHigh = num_periods
-            else:
-                tierHigh = int((period+1)*12)
-            yield dict(
-                    [
-                        ('loanId', row[0]),
-                        ('tierLow', int((period*12)+1)),
-                        ('tierHigh', tierHigh),
-                        ('rate', float(rates[period]))
-                    ]
-
-                )
-
-def sqlite_power(x,n):
-    return float(x)**n
 
 if __name__ == "__main__":
     main()

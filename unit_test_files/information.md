@@ -1,0 +1,1 @@
+Ignore this folder. It is used for unit and integration tests when changes are made to the model.

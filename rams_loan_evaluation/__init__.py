@@ -1,40 +1,23 @@
 import pandas as pd
-#from datetime import date
 import numpy as np
 import numpy_financial as npf
-#from collections import OrderedDict
 import math
 import sys
 import sqlite3
 
 def main():
-    file = f"test_files/{sys.argv[1]}"
-    loan_df_final = pd.read_excel(file)
-    loan_df = loan_df_final.rename(columns={
-        'Loan ID': 'loanId', 
-        'Servicing Cost per Month ($)': 'servicingCostDollar',
-        'Hold to Maturity?': 'holdToMaturity',
-        'Sale Date (months from today)': 'saleDateMonths',
-        'Sale - apply Buyer Discount Rate?     [YES/NO]': 'applyBuyerDiscRate',
-        'Buyer Discount Rate' : 'buyerDiscRate',
-        'Investor Discount Rate' : 'investorDiscRate',
-        'Sale or Exit Price': 'saleExitPrice'
-    })
-
-    loan_df = loan_df.rename(columns={'LoanId': 'loanId'})
+    loan_df_final, loan_df, loan_list = gather_input_dataframes(f"test_files/{sys.argv[1]}")
 
     reduced_columns = [
         'loanId','servicingCostDollar','holdToMaturity','saleDateMonths','applyBuyerDiscRate','buyerDiscRate','investorDiscRate','saleExitPrice'
     ]
-
-    loan_list = loan_df.values.tolist()
 
     prepayment_penalty = pd.DataFrame(prepayment_penalty_df(loan_list))
     default_recovery_rates = pd.DataFrame(default_recovery_df(loan_list))
     forbear_rates = pd.DataFrame(forbear_df(loan_list))
     loan_schedule = pd.DataFrame(amortization_schedule(loan_list))
 
-    loan_level, loan_schedules = loop_through_loans(
+    loan_level = loop_through_loans(
         loan_df[reduced_columns], prepayment_penalty, default_recovery_rates, forbear_rates, loan_schedule
     )
 
@@ -77,6 +60,25 @@ def main():
 
     final.to_excel(f"output_files/{sys.argv[2]}")
 
+def gather_input_dataframes(file):
+    loan_df_final = pd.read_excel(file)
+    loan_df = loan_df_final.rename(columns={
+        'Loan ID': 'loanId', 
+        'Servicing Cost per Month ($)': 'servicingCostDollar',
+        'Hold to Maturity?': 'holdToMaturity',
+        'Sale Date (months from today)': 'saleDateMonths',
+        'Sale - apply Buyer Discount Rate?     [YES/NO]': 'applyBuyerDiscRate',
+        'Buyer Discount Rate' : 'buyerDiscRate',
+        'Investor Discount Rate' : 'investorDiscRate',
+        'Sale or Exit Price': 'saleExitPrice'
+    })
+
+    loan_df = loan_df.rename(columns={'LoanId': 'loanId'})
+
+    loan_list = loan_df.values.tolist()
+
+    return loan_df_final, loan_df, loan_list
+
 def loop_through_loans(loans, prepayment_penalty, default_recovery, forbear_rates, loan_schedule, increment=300):
     loops = int(math.ceil(loans.count()[0] / increment))
     df_final = pd.DataFrame([])
@@ -100,13 +102,13 @@ def loop_through_loans(loans, prepayment_penalty, default_recovery, forbear_rate
         schedule_aggregate = model_aggregation(schedule)
         
         df_final = df_final.append(schedule_aggregate)
-        schedules = schedules.append(schedule)
+        print(f"completed {upper_bound} loans")
         
     #ratio beginning balance to loan npv
     price_balance_ratio = round(df_final['totalLoanNpv'] / df_final['beginBalance'], 6)
     df_final['priceBalanceRatio'] = price_balance_ratio
     
-    return df_final, schedules
+    return df_final
 
 # aggregation step
 def model_aggregation(df):
@@ -182,15 +184,6 @@ def model_aggregation(df):
     return loan_level_aggreates
 
 def cashflow_df(loan_schedule, forbear_rates, default_recovery_rates, loan_df, prepayment_penalty):
-
-    #Bug, missing a period because of a strange default recovery tier. Need to fix.
-
-    #forbearance recovery support
-    #rollup results
-    #confirm works for multiple loans
-
-    #This output will be the equivalent of the whole loan level tab
-    #This way we can check our work before summing the results in a later stage
 
     conn = sqlite3.connect(':memory:')
 
@@ -303,8 +296,6 @@ def cashflow_df(loan_schedule, forbear_rates, default_recovery_rates, loan_df, p
         left outer join sum_buyer_discount_sale ss 
         on cs.loanId = ss.loanId
         and cs.period = ss.saleDateMonths
-
-
         '''
     cashflow_schedule_df = pd.read_sql_query(qry, conn)
     return cashflow_schedule_df

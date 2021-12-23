@@ -45,7 +45,7 @@ To pull the latest version of the model perform the following steps:
    ```
    git checkout main
    git fetch origin
-   git merge origin/master
+   git merge origin/main
    ```
 
 ## Input File Requirements

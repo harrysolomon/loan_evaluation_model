@@ -24,7 +24,7 @@ There should now be a folder within documents titled loan_evaluation_model
 *Note: The model includes other python packages within it including: pandas, numpy, math, sys, and sqlite3, but these packages come for free when you download the latest python version (step 2).*
 
 ## Running the Model
-1. Place a valid loan file into the test_files folder located in `documents/loan_evaluation_model/rams_loan_evaluation` check out the test file section below for details on the contents of a valid loan file.
+1. Place a valid loan file into the test_files folder located in `documents/loan_evaluation_model/rams_loan_evaluation/test_files/` check out the test file section below for details on the contents of a valid loan file.
 2. Go to the command prompt
    - Navigate to the root directory by running the following command `cd`
    - Navigate to the folder where the model lives `cd documents/loan_evaluation_model/rams_loan_evaluation`

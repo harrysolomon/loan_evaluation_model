@@ -1,3 +1,5 @@
+## Potential Issues
+Sale date months can be a floating point. Therefore we need to round to the nearest whole number when this happens.
 
 This documentation outlines how to utilize the RAMS loan evaluation model on your local computer. Below we will cover the packages you need to install, how to run the model, how to update the model when new versions are released, and the expected inputs to the model.
 

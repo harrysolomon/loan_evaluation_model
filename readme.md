@@ -10,11 +10,11 @@ Below are the packages you must install in order to use the model. If executed c
 3. Instal numpy financial
    - Go to the command prompt
    - Navigate to the root directory by running the following command `cd`
-   - Run the following command `pip install numpy-financial`
+   - Run the following command `pip3 install numpy-financial`
 4. Install Openpyxl
    - Go to the command prompt
    - Navigate to the root directory by running the following command `cd`
-   - Run the following command `pip install openpyxl`
+   - Run the following command `pip3 install openpyxl`
 5. Import the model
    - Go to the command prompt
    - Navigate to the root directory by running the following command `cd`

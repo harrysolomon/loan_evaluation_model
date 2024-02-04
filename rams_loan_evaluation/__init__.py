@@ -62,6 +62,7 @@ def main():
 
 def gather_input_dataframes(file):
     loan_df_final = pd.read_excel(file)
+    
     loan_df = loan_df_final.rename(columns={
         'Loan ID': 'loanId', 
         'Servicing Cost per Month ($)': 'servicingCostDollar',
@@ -74,6 +75,8 @@ def gather_input_dataframes(file):
     })
 
     loan_df = loan_df.rename(columns={'LoanId': 'loanId'})
+    
+    loan_df.saleDateMonths = loan_df.saleDateMonths.round()
 
     loan_list = loan_df.values.tolist()
 
@@ -101,7 +104,7 @@ def loop_through_loans(loans, prepayment_penalty, default_recovery, forbear_rate
         
         schedule_aggregate = model_aggregation(schedule)
         
-        df_final = df_final.append(schedule_aggregate)
+        df_final = pd.concat([df_final,schedule_aggregate])
         print(f"completed {upper_bound} loans")
         
     #ratio beginning balance to loan npv
